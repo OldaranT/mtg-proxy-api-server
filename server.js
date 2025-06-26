@@ -23,9 +23,11 @@ app.get('/api/archidekt/:id', async (req, res) => {
 
     const images = [];
 
-    $('[data-card-name]').each((_, el) => {
+    // Extract card entries from the main deck list
+    $('.card-group-item [data-card-name]').each((_, el) => {
       const name = $(el).attr('data-card-name');
-      const quantity = parseInt($(el).closest('[data-card-quantity]').attr('data-card-quantity') || '1');
+      const parent = $(el).closest('[data-card-quantity]');
+      const quantity = parseInt(parent.attr('data-card-quantity')) || 1;
       const img = $(el).find('img').attr('src');
 
       if (name && img && img.includes('/card_images/')) {
@@ -35,15 +37,16 @@ app.get('/api/archidekt/:id', async (req, res) => {
 
     res.json({ images });
   } catch (err) {
-    console.error('Scraping failed:', err);
+    console.error('❌ Scraping failed:', err);
     res.status(500).json({ error: 'Failed to scrape deck page' });
   }
 });
 
+// Root endpoint
 app.get('/', (req, res) => {
-  res.send('MTG Proxy Scraper API is running ✅');
+  res.send('🟢 MTG Proxy Scraper API is running');
 });
 
 app.listen(PORT, () => {
-  console.log(`MTG Proxy Scraper API running on port ${PORT}`);
+  console.log(`🟢 MTG Proxy Scraper API running on port ${PORT}`);
 });
