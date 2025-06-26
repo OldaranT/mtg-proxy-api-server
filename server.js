@@ -10,7 +10,7 @@ app.use(cors());
 // 🟣 Archidekt Proxy Endpoint
 app.get('/api/archidekt/:id', async (req, res) => {
   const deckId = req.params.id;
-  const archidektUrl = `https://archidekt.com/api/decks/${deckId}/small/`;
+  const archidektUrl = `https://archidekt.com/api/decks/${deckId}/export/?format=json`;
 
   try {
     const response = await fetch(archidektUrl);
