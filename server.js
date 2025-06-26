@@ -10,19 +10,28 @@ app.use(cors());
 
 app.get('/api/archidekt/:id', async (req, res) => {
   const deckId = req.params.id;
-  const deckUrl = `https://archidekt.com/decks/${deckId}/?view=grid`; // 🔄 Force Grid View
+  const deckUrl = `https://archidekt.com/decks/${deckId}/?view=grid`;
 
   console.log(`\n📥 [REQUEST] Deck ID: ${deckId}`);
   console.log(`🔗 Fetching: ${deckUrl}`);
 
   try {
     const htmlRes = await fetch(deckUrl);
-    const html = await htmlRes.text();
-    const $ = cheerio.load(html);
+    console.log(`📡 HTTP Status: ${htmlRes.status}`);
 
+    const html = await htmlRes.text();
+    console.log(`📄 HTML Length: ${html.length}`);
+    console.log(`🔍 HTML Preview (first 1000 chars):\n${html.substring(0, 1000)}`);
+
+    if (html.includes('basicCardImage')) {
+      console.log('✅ Detected `basicCardImage` in HTML');
+    } else {
+      console.warn('❌ `basicCardImage` NOT FOUND in HTML');
+    }
+
+    const $ = cheerio.load(html);
     const images = [];
 
-    // 🔎 Each card is inside this container in Grid View
     $('.imageCard_imageCard__x7s_J').each((_, el) => {
       const imgEl = $(el).find('img#basicCardImage');
       const qtyEl = $(el).find('button.cornerQuantity_cornerQuantity__or_QR');
@@ -35,22 +44,22 @@ app.get('/api/archidekt/:id', async (req, res) => {
         images.push({ name, img, quantity });
         console.log(`🃏 ${name} × ${quantity}`);
       } else {
-        console.warn(`⚠️ Skipped an invalid card (missing name/image/quantity)`);
+        console.warn('⚠️ Skipped a card — missing name/image/quantity');
       }
     });
 
-    console.log(`✅ Total cards returned: ${images.length}`);
+    console.log(`✅ Total cards extracted: ${images.length}`);
     res.json({ images });
   } catch (err) {
-    console.error("❌ Scraping failed:", err);
+    console.error('❌ Scraping failed:', err);
     res.status(500).json({ error: 'Failed to scrape Archidekt deck page' });
   }
 });
 
 app.get('/', (req, res) => {
-  res.send('✅ MTG Proxy Scraper API (Grid view enforced) is running');
+  res.send('✅ MTG Proxy Scraper API (with HTML logging) is running');
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server live on port ${PORT}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
 });
