@@ -22,7 +22,7 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 
     const page = await browser.newPage();
 
-    console.log("💾 Setting deckView cookie for table view...");
+    console.log("💾 Setting 'deckView' cookie to force table view...");
     await page.setCookie({
       name: 'deckView',
       value: '4',
@@ -36,33 +36,37 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
     console.log("📄 Page loaded. Extracting card data...");
+
     const cards = await page.evaluate(() => {
       const rows = document.querySelectorAll('.table_row__yAAZX');
       const data = [];
 
       rows.forEach((row, index) => {
-        const nameEl = row.querySelector('button.spreadsheetCard_cardName__OH0lE span span');
-        const qtyEl = row.querySelector('input[type="number"]');
-        const finishBtn = row.querySelector('.spreadsheetCard_modifier__YtDhf button');
-        const setTextEl = row.querySelector('.spreadsheetCard_setName__37QxL');
+        try {
+          const nameEl = row.querySelector('.spreadsheetCard_cursorCard___VhiF > span');
+          const qtyEl = row.querySelector('.spreadsheetCard_quantity__aYj_y input');
+          const finishBtn = row.querySelector('.spreadsheetCard_modifier__YtDhf button');
+          const setInput = row.querySelector('.spreadsheetCard_setName__37QxL input');
 
-        if (nameEl && qtyEl && finishBtn && setTextEl) {
-          const name = nameEl.textContent.trim();
-          const quantity = parseInt(qtyEl.value, 10) || 1;
-          const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
+          const name = nameEl?.textContent?.trim();
+          const quantity = parseInt(qtyEl?.value, 10) || 1;
+          const finishText = finishBtn?.textContent?.trim()?.toLowerCase() || 'normal';
+          const foil = finishText === 'foil';
 
-          const setText = setTextEl.textContent;
-          const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
+          const placeholder = setInput?.getAttribute('placeholder') || '';
+          const match = placeholder.match(/\((\w+)\)\s*\((\d+)\)/); // (set) (number)
           const setCode = match?.[1];
           const collectorNumber = match?.[2];
 
-          if (setCode && collectorNumber) {
-            data.push({ name, quantity, foil, setCode, collectorNumber });
+          if (name && setCode && collectorNumber) {
+            const card = { name, quantity, foil, setCode, collectorNumber };
+            data.push(card);
+            console.log(`📝 [Scraped] ${JSON.stringify(card)}`);
           } else {
-            console.warn(`⚠️ [Row ${index}] Could not parse set info: "${setText}"`);
+            console.warn(`⚠️ [Row ${index}] Missing or malformed set data: "${placeholder}"`);
           }
-        } else {
-          console.warn(`⚠️ [Row ${index}] Missing data fields`);
+        } catch (e) {
+          console.warn(`❌ [Row ${index}] Error extracting card data: ${e.message}`);
         }
       });
 
@@ -70,13 +74,13 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     });
 
     await browser.close();
-    console.log(`✅ Extracted ${cards.length} card(s).`);
+    console.log(`✅ Finished extraction. Total cards: ${cards.length}`);
 
     const images = [];
 
     for (const card of cards) {
       const apiUrl = `https://api.scryfall.com/cards/${card.setCode}/${card.collectorNumber}`;
-      console.log(`🔗 Fetching image for "${card.name}" from ${apiUrl}`);
+      console.log(`🌐 Fetching image for "${card.name}" from ${apiUrl}`);
 
       try {
         const response = await fetch(apiUrl);
@@ -88,7 +92,7 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
         }
 
         if (img) {
-          console.log(`🖼️ Found image for "${card.name}"`);
+          console.log(`🖼️ Image found for: ${card.name}`);
           images.push({
             name: card.name,
             img,
@@ -98,14 +102,14 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
             collectorNumber: card.collectorNumber
           });
         } else {
-          console.warn(`⚠️ No image for "${card.name}"`);
+          console.warn(`⚠️ No image found for: ${card.name}`);
         }
       } catch (err) {
-        console.error(`❌ Scryfall fetch failed for "${card.name}": ${err.message}`);
+        console.error(`❌ Scryfall error for "${card.name}": ${err.message}`);
       }
     }
 
-    console.log(`📦 Done. Returning ${images.length} image(s) to client.`);
+    console.log(`📦 Returning ${images.length} image(s) to client.`);
     res.json({ images });
 
   } catch (err) {
