@@ -6,15 +6,13 @@ const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fet
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({
-  origin: 'https://oldarant.github.io'
-}));
+app.use(cors());
 
 app.get('/api/archidekt/:deckId', async (req, res) => {
   const deckId = req.params.deckId;
   const url = `https://archidekt.com/decks/${deckId}/view`;
 
-  console.log(`🔍 Scraping Archidekt deck: ${url}`);
+  console.log(`🔍 [START] Scraping Archidekt deck: ${url}`);
 
   try {
     const browser = await puppeteer.launch({
@@ -24,7 +22,7 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 
     const page = await browser.newPage();
 
-    // Force table view with cookie
+    console.log("💾 Setting deckView cookie for table view...");
     await page.setCookie({
       name: 'deckView',
       value: '4',
@@ -34,14 +32,15 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
       secure: true
     });
 
+    console.log("🌐 Navigating to page...");
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    console.log("📄 Page loaded, extracting cards...");
 
+    console.log("📄 Page loaded. Extracting card data...");
     const cards = await page.evaluate(() => {
       const rows = document.querySelectorAll('.table_row__yAAZX');
       const data = [];
 
-      rows.forEach(row => {
+      rows.forEach((row, index) => {
         const nameEl = row.querySelector('button.spreadsheetCard_cardName__OH0lE span span');
         const qtyEl = row.querySelector('input[type="number"]');
         const finishBtn = row.querySelector('.spreadsheetCard_modifier__YtDhf button');
@@ -52,7 +51,6 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
           const quantity = parseInt(qtyEl.value, 10) || 1;
           const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
 
-          // Extract set info like "Final Fantasy Commander - (fic) (345)"
           const setText = setTextEl.textContent;
           const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
           const setCode = match?.[1];
@@ -60,7 +58,11 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 
           if (setCode && collectorNumber) {
             data.push({ name, quantity, foil, setCode, collectorNumber });
+          } else {
+            console.warn(`⚠️ [Row ${index}] Could not parse set info: "${setText}"`);
           }
+        } else {
+          console.warn(`⚠️ [Row ${index}] Missing data fields`);
         }
       });
 
@@ -68,22 +70,25 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     });
 
     await browser.close();
+    console.log(`✅ Extracted ${cards.length} card(s).`);
 
-    console.log(`✅ Extracted ${cards.length} card(s). Fetching images from Scryfall...`);
     const images = [];
 
     for (const card of cards) {
       const apiUrl = `https://api.scryfall.com/cards/${card.setCode}/${card.collectorNumber}`;
+      console.log(`🔗 Fetching image for "${card.name}" from ${apiUrl}`);
+
       try {
         const response = await fetch(apiUrl);
         const data = await response.json();
 
         let img = data?.image_uris?.normal;
         if (card.foil && data?.foil && data.image_uris?.normal) {
-          img = data.image_uris.normal; // no direct foil URL fallback, still use image_uris
+          img = data.image_uris.normal;
         }
 
         if (img) {
+          console.log(`🖼️ Found image for "${card.name}"`);
           images.push({
             name: card.name,
             img,
@@ -93,22 +98,22 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
             collectorNumber: card.collectorNumber
           });
         } else {
-          console.warn(`⚠️ No image found for: ${card.name}`);
+          console.warn(`⚠️ No image for "${card.name}"`);
         }
       } catch (err) {
-        console.error(`❌ Scryfall error for ${card.name}:`, err.message);
+        console.error(`❌ Scryfall fetch failed for "${card.name}": ${err.message}`);
       }
     }
 
-    console.log(`📦 Done. Returning ${images.length} images to client.`);
+    console.log(`📦 Done. Returning ${images.length} image(s) to client.`);
     res.json({ images });
 
   } catch (err) {
-    console.error("❌ Scraping failed:", err);
+    console.error("❌ Global scraping error:", err);
     res.status(500).json({ error: "Scraping failed", details: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 MTG Proxy API running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
