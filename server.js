@@ -1,61 +1,64 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
 const cors = require('cors');
-const cheerio = require('cheerio');
+const puppeteer = require('puppeteer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-app.get('/api/archidekt/:id', async (req, res) => {
-  const deckId = req.params.id;
-  const deckUrl = `https://archidekt.com/decks/${deckId}/?view=stacks`;
+app.get('/api/archidekt/:deckId', async (req, res) => {
+  const deckId = req.params.deckId;
+  const url = `https://archidekt.com/decks/${deckId}`;
 
-  console.log(`\n📥 [Puppeteer] Loading deck: ${deckUrl}`);
+  console.log(`📥 Fetching deck ${deckId} from: ${url}`);
 
   try {
     const browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
     const page = await browser.newPage();
-    await page.goto(deckUrl, { waitUntil: 'networkidle2' });
+    await page.goto(url, { waitUntil: 'networkidle2' });
 
-    // Wait for card images to be rendered
-    await page.waitForSelector('img#basicCardImage', { timeout: 15000 });
+    console.log('⏳ Waiting for cards to render...');
+    await page.waitForSelector('img#basicCardImage');
 
-    const content = await page.content();
-    await browser.close();
+    // Get all images and quantities
+    const cards = await page.evaluate(() => {
+      const result = [];
+      const cardNodes = document.querySelectorAll('img#basicCardImage');
 
-    const $ = cheerio.load(content);
-    const images = [];
+      cardNodes.forEach(img => {
+        const parent = img.closest('.imageCard_imageCard__x7s_J');
+        const quantityBtn = parent?.querySelector('.cornerQuantity_cornerQuantity__or_QR');
+        const quantity = quantityBtn ? parseInt(quantityBtn.textContent.trim(), 10) : 1;
 
-    $('.imageCard_imageCard__x7s_J').each((_, el) => {
-      const imgEl = $(el).find('img#basicCardImage');
-      const qtyEl = $(el).find('button.cornerQuantity_cornerQuantity__or_QR');
+        result.push({
+          name: img.getAttribute('alt') || 'Unknown',
+          img: img.getAttribute('src'),
+          quantity
+        });
+      });
 
-      const name = imgEl.attr('alt')?.trim();
-      const img = imgEl.attr('src');
-      const quantity = parseInt(qtyEl.text().trim(), 10) || 1;
-
-      if (name && img) {
-        images.push({ name, img, quantity });
-        console.log(`🃏 ${name} × ${quantity}`);
-      }
+      return result;
     });
 
-    res.json({ images });
-  } catch (err) {
-    console.error('❌ Puppeteer scrape failed:', err);
-    res.status(500).json({ error: 'Scraping with Puppeteer failed' });
+    await browser.close();
+
+    console.log(`✅ Found ${cards.length} cards`);
+    res.json({ images: cards });
+  } catch (error) {
+    console.error('❌ Error scraping Archidekt:', error);
+    res.status(500).json({ error: 'Failed to fetch deck images' });
   }
 });
 
 app.get('/', (req, res) => {
-  res.send('✅ MTG Proxy API (with Puppeteer) is running');
+  res.send('MTG Proxy API is running');
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 MTG Proxy API server is running on port ${PORT}`);
 });
