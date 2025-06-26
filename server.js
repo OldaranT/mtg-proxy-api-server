@@ -1,46 +1,49 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
+const cheerio = require('cheerio');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// 🟣 Archidekt Proxy Endpoint
 app.get('/api/archidekt/:id', async (req, res) => {
   const deckId = req.params.id;
-  const archidektUrl = `https://archidekt.com/api/decks/${deckId}/export/?format=json`;
+  const deckUrl = `https://archidekt.com/decks/${deckId}/`;
 
   try {
-    const response = await fetch(archidektUrl);
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch deck.' });
-  }
-});
+    const htmlRes = await fetch(deckUrl);
+    if (!htmlRes.ok) {
+      return res.status(htmlRes.status).json({ error: 'Failed to fetch Archidekt deck page' });
+    }
 
-// 🟣 (Future) Scryfall Proxy Example
-app.get('/api/scryfall/:name', async (req, res) => {
-  const name = req.params.name;
-  const scryfallUrl = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(name)}`;
+    const html = await htmlRes.text();
+    const $ = cheerio.load(html);
 
-  try {
-    const response = await fetch(scryfallUrl);
-    const data = await response.json();
-    res.json(data);
+    const images = [];
+
+    $('[data-card-name]').each((_, el) => {
+      const name = $(el).attr('data-card-name');
+      const quantity = parseInt($(el).closest('[data-card-quantity]').attr('data-card-quantity') || '1');
+      const img = $(el).find('img').attr('src');
+
+      if (name && img && img.includes('/card_images/')) {
+        images.push({ name, img, quantity });
+      }
+    });
+
+    res.json({ images });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch card from Scryfall.' });
+    console.error('Scraping failed:', err);
+    res.status(500).json({ error: 'Failed to scrape deck page' });
   }
 });
 
 app.get('/', (req, res) => {
-  res.send('MTG Proxy API Server is up and running ✅');
+  res.send('MTG Proxy Scraper API is running ✅');
 });
 
 app.listen(PORT, () => {
-  console.log(`MTG Proxy API server is running on port ${PORT}`);
+  console.log(`MTG Proxy Scraper API running on port ${PORT}`);
 });
