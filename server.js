@@ -28,9 +28,9 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     });
 
     const [page] = await browser.pages();
-    const context = browser.defaultBrowserContext();
 
-    await context.setCookie({
+    // ✅ Set the 'deckView' cookie to force table view
+    await page.setCookie({
       name: 'deckView',
       value: '4',
       domain: 'archidekt.com',
