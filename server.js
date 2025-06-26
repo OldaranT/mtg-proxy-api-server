@@ -1,11 +1,15 @@
-const puppeteer = require('puppeteer');
 const express = require('express');
+const puppeteer = require('puppeteer');
+const fetch = require('node-fetch');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/api/archidekt/:deckId', async (req, res) => {
   const deckId = req.params.deckId;
   const url = `https://archidekt.com/decks/${deckId}/view`;
+
+  console.log(`🔍 Scraping Archidekt deck: ${url}`);
 
   try {
     const browser = await puppeteer.launch({
@@ -23,11 +27,10 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     const [page] = await browser.pages();
     const context = browser.defaultBrowserContext();
 
-    // ✅ Set the deckView cookie to '4' (table view) at the browser context level
-    await context.overridePermissions(url, []); // optional, can omit
+    // ✅ Force deckView to table view via cookie
     await context.setCookie({
       name: 'deckView',
-      value: '4',
+      value: '4', // table view
       domain: 'archidekt.com',
       path: '/',
       httpOnly: false,
@@ -36,10 +39,12 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    // 💡 Insert scraping logic here (table view parsing)
+    console.log("📄 Page loaded, extracting cards...");
+
+    // Extract card names + quantities from table view
     const cards = await page.evaluate(() => {
       const rows = document.querySelectorAll('.table_row__yAAZX');
-      const result = [];
+      const extracted = [];
 
       rows.forEach(row => {
         const nameBtn = row.querySelector('button.spreadsheetCard_cardName__OH0lE span span');
@@ -48,39 +53,46 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
         if (nameBtn && qtyInput) {
           const name = nameBtn.textContent.trim();
           const quantity = parseInt(qtyInput.value, 10) || 1;
-          result.push({ name, quantity });
+          extracted.push({ name, quantity });
         }
       });
 
-      return result;
+      return extracted;
     });
 
-    console.log(`✅ Scraped ${cards.length} cards`);
+    console.log(`✅ Extracted ${cards.length} card(s). Fetching images from Scryfall...`);
 
-    // 📦 Now resolve card image URLs from Scryfall
     const images = [];
+
     for (const card of cards) {
       try {
-        const response = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
-        const data = await response.json();
+        const res = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
+        const data = await res.json();
         const img = data.image_uris?.normal || data.card_faces?.[0]?.image_uris?.normal;
 
         if (img) {
-          images.push({ name: card.name, img, quantity: card.quantity });
+          images.push({
+            name: card.name,
+            img,
+            quantity: card.quantity
+          });
+        } else {
+          console.warn(`⚠️ No image found for: ${card.name}`);
         }
       } catch (err) {
-        console.warn(`⚠️ Failed to fetch Scryfall image for: ${card.name}`);
+        console.error(`❌ Scryfall fetch error for ${card.name}:`, err.message);
       }
     }
 
     await browser.close();
-    return res.json({ images });
+    console.log(`📦 Done. Sending ${images.length} images to client.`);
+    res.json({ images });
   } catch (err) {
     console.error("❌ Error scraping Archidekt:", err);
-    return res.status(500).json({ error: "Scraping failed" });
+    res.status(500).json({ error: "Scraping failed", details: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server listening on http://localhost:${PORT}`);
+  console.log(`🚀 MTG Proxy API running on http://localhost:${PORT}`);
 });
