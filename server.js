@@ -37,6 +37,10 @@ app.get('/api/scryfall/:name', async (req, res) => {
   }
 });
 
+app.get('/', (req, res) => {
+  res.send('MTG Proxy API Server is up and running ✅');
+});
+
 app.listen(PORT, () => {
   console.log(`MTG Proxy API server is running on port ${PORT}`);
 });
