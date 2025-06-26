@@ -56,29 +56,33 @@ async function scrapeArchidekt(deckId, res) {
       const data = [];
 
       rows.forEach((row, index) => {
-        const nameEl = row.querySelector('.spreadsheetCard_cursorCard');
-        const qtyEl = row.querySelector('.spreadsheetCard_quantity input');
-        const finishBtn = row.querySelector('.spreadsheetCard_modifier button');
-        const setInput = row.querySelector('.spreadsheetCard_setName input');
+        try {
+          const nameEl = row.querySelector('[class^="spreadsheetCard_cursorCard"] span');
+          const qtyEl = row.querySelector('[class^="spreadsheetCard_quantity"] input[type="number"]');
+          const finishBtn = row.querySelector('[class^="spreadsheetCard_modifier"] button');
+          const setInput = row.querySelector('[class^="spreadsheetCard_setName"] input');
 
-        if (nameEl && qtyEl && finishBtn && setInput) {
-          const name = nameEl.textContent.trim();
-          const quantity = parseInt(qtyEl.value, 10) || 1;
-          const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
+          if (nameEl && qtyEl && finishBtn && setInput) {
+            const name = nameEl.textContent.trim();
+            const quantity = parseInt(qtyEl.value, 10) || 1;
+            const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
 
-          const setText = setInput.placeholder;
-          const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
-          const setCode = match?.[1];
-          const collectorNumber = match?.[2];
+            const setText = setInput.placeholder || setInput.value || '';
+            const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
+            const setCode = match?.[1];
+            const collectorNumber = match?.[2];
 
-          if (setCode && collectorNumber) {
-            data.push({ name, quantity, foil, setCode, collectorNumber });
-            console.log(`[✓] [Row ${index}] ${name} (${setCode} #${collectorNumber}) x${quantity} ${foil ? '[Foil]' : ''}`);
+            if (name && setCode && collectorNumber) {
+              data.push({ name, quantity, foil, setCode, collectorNumber });
+              console.log(`🟢 [${index}] Added: ${name} (${quantity}) — ${foil ? 'Foil' : 'Normal'} — ${setCode} #${collectorNumber}`);
+            } else {
+              console.warn(`⚠️ [${index}] Missing fields: name="${name}", set="${setText}"`);
+            }
           } else {
-            console.warn(`[⚠️] [Row ${index}] Failed to extract set info: ${setText}`);
+            console.warn(`⚠️ [${index}] Incomplete row — skipping.`);
           }
-        } else {
-          console.warn(`[⚠️] [Row ${index}] Missing one or more elements`);
+        } catch (err) {
+          console.error(`❌ [${index}] Error parsing row:`, err);
         }
       });
 
