@@ -1,6 +1,11 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 const path = require('path');
+const cors = require('cors');
+
+app.use(cors({
+  origin: 'https://oldarant.github.io'
+}));
 
 const fetch = (...args) =>
   import('node-fetch').then(({ default: fetch }) => fetch(...args));
