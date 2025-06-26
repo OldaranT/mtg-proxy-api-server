@@ -10,54 +10,47 @@ app.use(cors());
 
 app.get('/api/archidekt/:id', async (req, res) => {
   const deckId = req.params.id;
-  const deckUrl = `https://archidekt.com/decks/${deckId}/`;
+  const deckUrl = `https://archidekt.com/decks/${deckId}/?view=grid`; // 🔄 Force Grid View
 
-  console.log(`\n📥 [REQUEST] Fetching deck ${deckId} from Archidekt`);
-  console.log(`🌐 Target URL: ${deckUrl}`);
+  console.log(`\n📥 [REQUEST] Deck ID: ${deckId}`);
+  console.log(`🔗 Fetching: ${deckUrl}`);
 
   try {
     const htmlRes = await fetch(deckUrl);
-    console.log(`🔄 Fetch status: ${htmlRes.status}`);
-
-    if (!htmlRes.ok) {
-      console.error(`❌ Failed to fetch Archidekt deck page (status ${htmlRes.status})`);
-      return res.status(htmlRes.status).json({ error: 'Failed to fetch Archidekt deck page' });
-    }
-
     const html = await htmlRes.text();
     const $ = cheerio.load(html);
 
     const images = [];
-    const cardBlocks = $('[data-card-quantity]');
-    console.log(`🔍 Found ${cardBlocks.length} card quantity blocks`);
 
-    cardBlocks.each((_, el) => {
-      const quantity = parseInt($(el).attr('data-card-quantity')) || 1;
+    // 🔎 Each card is inside this container in Grid View
+    $('.imageCard_imageCard__x7s_J').each((_, el) => {
       const imgEl = $(el).find('img#basicCardImage');
-      const img = imgEl.attr('src');
-      const name = imgEl.attr('alt');
+      const qtyEl = $(el).find('button.cornerQuantity_cornerQuantity__or_QR');
 
-      if (name && img && img.includes('/card_images/')) {
-        console.log(`🃏 Found card: ${name} ×${quantity}`);
+      const name = imgEl.attr('alt')?.trim();
+      const img = imgEl.attr('src');
+      const quantity = parseInt(qtyEl.text().trim(), 10) || 1;
+
+      if (name && img && img.includes('scryfall')) {
         images.push({ name, img, quantity });
+        console.log(`🃏 ${name} × ${quantity}`);
       } else {
-        console.warn(`⚠️ Skipping block — Missing valid image or name`);
+        console.warn(`⚠️ Skipped an invalid card (missing name/image/quantity)`);
       }
     });
 
     console.log(`✅ Total cards returned: ${images.length}`);
-
     res.json({ images });
   } catch (err) {
-    console.error('❌ Exception while scraping:', err);
-    res.status(500).json({ error: 'Failed to scrape deck page' });
+    console.error("❌ Scraping failed:", err);
+    res.status(500).json({ error: 'Failed to scrape Archidekt deck page' });
   }
 });
 
 app.get('/', (req, res) => {
-  res.send('✅ MTG Proxy Scraper API is running with verbose logging');
+  res.send('✅ MTG Proxy Scraper API (Grid view enforced) is running');
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 MTG Proxy Scraper API running on port ${PORT}`);
+  console.log(`🚀 Server live on port ${PORT}`);
 });
