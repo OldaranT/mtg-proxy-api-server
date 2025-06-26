@@ -14,7 +14,7 @@
     "scryfall",
     "card-images"
   ],
-  "author": "Your Name",
+  "author": "Eris",
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",

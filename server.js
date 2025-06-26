@@ -1,10 +1,7 @@
 const express = require('express');
-const puppeteer = require('puppeteer');
-const path = require('path');
 const cors = require('cors');
-
-const fetch = (...args) =>
-  import('node-fetch').then(({ default: fetch }) => fetch(...args));
+const puppeteer = require('puppeteer');
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,80 +19,88 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
   try {
     const browser = await puppeteer.launch({
       headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-zygote',
-        '--single-process'
-      ]
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
-    const [page] = await browser.pages();
+    const page = await browser.newPage();
 
-    // ✅ Set cookie to force table view
+    // Force table view with cookie
     await page.setCookie({
       name: 'deckView',
-      value: '4', // Table view
+      value: '4',
       domain: 'archidekt.com',
       path: '/',
       httpOnly: false,
       secure: true
     });
 
-    console.log('🍪 Cookie set to table view');
-
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-
-    console.log('📄 Page loaded. Extracting card data...');
+    console.log("📄 Page loaded, extracting cards...");
 
     const cards = await page.evaluate(() => {
       const rows = document.querySelectorAll('.table_row__yAAZX');
-      const extracted = [];
+      const data = [];
 
       rows.forEach(row => {
         const nameEl = row.querySelector('button.spreadsheetCard_cardName__OH0lE span span');
         const qtyEl = row.querySelector('input[type="number"]');
+        const finishBtn = row.querySelector('.spreadsheetCard_modifier__YtDhf button');
+        const setTextEl = row.querySelector('.spreadsheetCard_setName__37QxL');
 
-        if (nameEl && qtyEl) {
+        if (nameEl && qtyEl && finishBtn && setTextEl) {
           const name = nameEl.textContent.trim();
           const quantity = parseInt(qtyEl.value, 10) || 1;
-          extracted.push({ name, quantity });
+          const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
+
+          // Extract set info like "Final Fantasy Commander - (fic) (345)"
+          const setText = setTextEl.textContent;
+          const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
+          const setCode = match?.[1];
+          const collectorNumber = match?.[2];
+
+          if (setCode && collectorNumber) {
+            data.push({ name, quantity, foil, setCode, collectorNumber });
+          }
         }
       });
 
-      return extracted;
+      return data;
     });
 
-    console.log(`🧠 Found ${cards.length} cards. Querying Scryfall for images...`);
+    await browser.close();
 
+    console.log(`✅ Extracted ${cards.length} card(s). Fetching images from Scryfall...`);
     const images = [];
 
     for (const card of cards) {
+      const apiUrl = `https://api.scryfall.com/cards/${card.setCode}/${card.collectorNumber}`;
       try {
-        const scryfallRes = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
-        const scryfallData = await scryfallRes.json();
+        const response = await fetch(apiUrl);
+        const data = await response.json();
 
-        const img = scryfallData.image_uris?.normal || scryfallData.card_faces?.[0]?.image_uris?.normal;
+        let img = data?.image_uris?.normal;
+        if (card.foil && data?.foil && data.image_uris?.normal) {
+          img = data.image_uris.normal; // no direct foil URL fallback, still use image_uris
+        }
 
         if (img) {
           images.push({
             name: card.name,
             img,
-            quantity: card.quantity
+            quantity: card.quantity,
+            foil: card.foil,
+            set: card.setCode,
+            collectorNumber: card.collectorNumber
           });
         } else {
-          console.warn(`⚠️ No image for ${card.name}`);
+          console.warn(`⚠️ No image found for: ${card.name}`);
         }
       } catch (err) {
-        console.error(`❌ Scryfall error for ${card.name}: ${err.message}`);
+        console.error(`❌ Scryfall error for ${card.name}:`, err.message);
       }
     }
 
-    await browser.close();
-
-    console.log(`✅ Done! Returning ${images.length} images.`);
+    console.log(`📦 Done. Returning ${images.length} images to client.`);
     res.json({ images });
 
   } catch (err) {
@@ -105,5 +110,5 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 MTG Proxy API server running at http://localhost:${PORT}`);
+  console.log(`🚀 MTG Proxy API running on http://localhost:${PORT}`);
 });
