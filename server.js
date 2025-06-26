@@ -21,7 +21,7 @@ app.get('/api/archidekt/:id', async (req, res) => {
 
     const html = await htmlRes.text();
     console.log(`📄 HTML Length: ${html.length}`);
-    console.log(`🔍 HTML Preview (first 1000 chars):\n${html.substring(0, 1000)}`);
+    console.log(`🔍 HTML Preview (first 1000 chars):\n${html}`);
 
     if (html.includes('basicCardImage')) {
       console.log('✅ Detected `basicCardImage` in HTML');
