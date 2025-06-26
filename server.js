@@ -3,15 +3,15 @@ const puppeteer = require('puppeteer');
 const path = require('path');
 const cors = require('cors');
 
-app.use(cors({
-  origin: 'https://oldarant.github.io'
-}));
-
 const fetch = (...args) =>
   import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+app.use(cors({
+  origin: 'https://oldarant.github.io'
+}));
 
 app.get('/api/archidekt/:deckId', async (req, res) => {
   const deckId = req.params.deckId;
