@@ -1,6 +1,9 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
-const fetch = require('node-fetch');
+const path = require('path');
+
+const fetch = (...args) =>
+  import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,14 +11,11 @@ const PORT = process.env.PORT || 3000;
 app.get('/api/archidekt/:deckId', async (req, res) => {
   const deckId = req.params.deckId;
   const url = `https://archidekt.com/decks/${deckId}/view`;
-  const debugLog = req.query.log === 'true';
 
   console.log(`🔍 Scraping Archidekt deck: ${url}`);
 
-  let browser;
-
   try {
-    browser = await puppeteer.launch({
+    const browser = await puppeteer.launch({
       headless: 'new',
       args: [
         '--no-sandbox',
@@ -29,36 +29,33 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 
     const [page] = await browser.pages();
 
-    // ✅ Set the 'deckView' cookie to force table view
+    // ✅ Set cookie to force table view
     await page.setCookie({
       name: 'deckView',
-      value: '4',
+      value: '4', // Table view
       domain: 'archidekt.com',
       path: '/',
       httpOnly: false,
       secure: true
     });
 
+    console.log('🍪 Cookie set to table view');
+
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
-    if (debugLog) {
-      const html = await page.content();
-      console.log("📝 DEBUG HTML:", html.substring(0, 2000)); // print first 2k chars
-    }
-
-    console.log("📄 Page loaded, extracting cards...");
+    console.log('📄 Page loaded. Extracting card data...');
 
     const cards = await page.evaluate(() => {
       const rows = document.querySelectorAll('.table_row__yAAZX');
       const extracted = [];
 
       rows.forEach(row => {
-        const nameBtn = row.querySelector('button.spreadsheetCard_cardName__OH0lE span span');
-        const qtyInput = row.querySelector('input[type="number"]');
+        const nameEl = row.querySelector('button.spreadsheetCard_cardName__OH0lE span span');
+        const qtyEl = row.querySelector('input[type="number"]');
 
-        if (nameBtn && qtyInput) {
-          const name = nameBtn.textContent.trim();
-          const quantity = parseInt(qtyInput.value, 10) || 1;
+        if (nameEl && qtyEl) {
+          const name = nameEl.textContent.trim();
+          const quantity = parseInt(qtyEl.value, 10) || 1;
           extracted.push({ name, quantity });
         }
       });
@@ -66,15 +63,16 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
       return extracted;
     });
 
-    console.log(`✅ Extracted ${cards.length} card(s). Fetching images from Scryfall...`);
+    console.log(`🧠 Found ${cards.length} cards. Querying Scryfall for images...`);
 
     const images = [];
 
     for (const card of cards) {
       try {
-        const scryRes = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
-        const cardData = await scryRes.json();
-        const img = cardData.image_uris?.normal || cardData.card_faces?.[0]?.image_uris?.normal;
+        const scryfallRes = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
+        const scryfallData = await scryfallRes.json();
+
+        const img = scryfallData.image_uris?.normal || scryfallData.card_faces?.[0]?.image_uris?.normal;
 
         if (img) {
           images.push({
@@ -90,20 +88,17 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
       }
     }
 
-    console.log(`📦 Done. Returning ${images.length} images to client.`);
+    await browser.close();
+
+    console.log(`✅ Done! Returning ${images.length} images.`);
     res.json({ images });
 
   } catch (err) {
-    console.error("❌ Scrape failed:", err);
-    res.status(500).json({ error: 'Scraping failed', details: err.message });
-
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
+    console.error("❌ Scraping failed:", err);
+    res.status(500).json({ error: "Scraping failed", details: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 MTG Proxy API running on http://localhost:${PORT}`);
+  console.log(`🚀 MTG Proxy API server running at http://localhost:${PORT}`);
 });
