@@ -11,7 +11,7 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
   const deckId = req.params.deckId;
   const url = `https://archidekt.com/decks/${deckId}`;
 
-  console.log(`📥 Fetching deck ${deckId} from: ${url}`);
+  console.log(`📥 Scraping Archidekt deck: ${url}`);
 
   try {
     const browser = await puppeteer.launch({
@@ -20,26 +20,32 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     });
 
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2' });
 
-    console.log('⏳ Waiting for cards to render...');
-    await page.waitForSelector('img#basicCardImage');
+    console.log('🌐 Navigating to page...');
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
 
-    // Get all images and quantities
+    // Wait for any basic card image to appear
+    console.log('⏳ Waiting for card images...');
+    await page.waitForSelector('img#basicCardImage', { timeout: 20000 });
+
+    // Extract card data
     const cards = await page.evaluate(() => {
       const result = [];
-      const cardNodes = document.querySelectorAll('img#basicCardImage');
+      const cardEls = document.querySelectorAll('img#basicCardImage');
 
-      cardNodes.forEach(img => {
-        const parent = img.closest('.imageCard_imageCard__x7s_J');
-        const quantityBtn = parent?.querySelector('.cornerQuantity_cornerQuantity__or_QR');
-        const quantity = quantityBtn ? parseInt(quantityBtn.textContent.trim(), 10) : 1;
+      cardEls.forEach(img => {
+        const name = img.getAttribute('alt') || 'Unknown';
+        const imgUrl = img.getAttribute('src');
 
-        result.push({
-          name: img.getAttribute('alt') || 'Unknown',
-          img: img.getAttribute('src'),
-          quantity
-        });
+        // Quantity is in the closest parent element's .cornerQuantity_cornerQuantity__or_QR button
+        const container = img.closest('.imageCard_imageCard__x7s_J');
+        const qtyEl = container?.querySelector('.cornerQuantity_cornerQuantity__or_QR');
+        const quantity = qtyEl ? parseInt(qtyEl.textContent.trim(), 10) : 1;
+
+        result.push({ name, img: imgUrl, quantity });
       });
 
       return result;
@@ -50,15 +56,15 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     console.log(`✅ Found ${cards.length} cards`);
     res.json({ images: cards });
   } catch (error) {
-    console.error('❌ Error scraping Archidekt:', error);
-    res.status(500).json({ error: 'Failed to fetch deck images' });
+    console.error('❌ Puppeteer scrape failed:', error);
+    res.status(500).json({ error: 'Failed to scrape Archidekt deck' });
   }
 });
 
 app.get('/', (req, res) => {
-  res.send('MTG Proxy API is running');
+  res.send('🧙‍♂️ MTG Proxy API is running!');
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 MTG Proxy API server is running on port ${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
 });
