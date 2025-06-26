@@ -1,5 +1,5 @@
 const express = require('express');
-const fetch = require('node-fetch');
+const puppeteer = require('puppeteer');
 const cors = require('cors');
 const cheerio = require('cheerio');
 
@@ -10,26 +10,25 @@ app.use(cors());
 
 app.get('/api/archidekt/:id', async (req, res) => {
   const deckId = req.params.id;
-  const deckUrl = `https://archidekt.com/decks/${deckId}/?view=grid`;
+  const deckUrl = `https://archidekt.com/decks/${deckId}/?view=stacks`;
 
-  console.log(`\n📥 [REQUEST] Deck ID: ${deckId}`);
-  console.log(`🔗 Fetching: ${deckUrl}`);
+  console.log(`\n📥 [Puppeteer] Loading deck: ${deckUrl}`);
 
   try {
-    const htmlRes = await fetch(deckUrl);
-    console.log(`📡 HTTP Status: ${htmlRes.status}`);
+    const browser = await puppeteer.launch({
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    });
 
-    const html = await htmlRes.text();
-    console.log(`📄 HTML Length: ${html.length}`);
-    console.log(`🔍 HTML Preview (first 1000 chars):\n${html}`);
+    const page = await browser.newPage();
+    await page.goto(deckUrl, { waitUntil: 'networkidle2' });
 
-    if (html.includes('basicCardImage')) {
-      console.log('✅ Detected `basicCardImage` in HTML');
-    } else {
-      console.warn('❌ `basicCardImage` NOT FOUND in HTML');
-    }
+    // Wait for card images to be rendered
+    await page.waitForSelector('img#basicCardImage', { timeout: 15000 });
 
-    const $ = cheerio.load(html);
+    const content = await page.content();
+    await browser.close();
+
+    const $ = cheerio.load(content);
     const images = [];
 
     $('.imageCard_imageCard__x7s_J').each((_, el) => {
@@ -40,26 +39,23 @@ app.get('/api/archidekt/:id', async (req, res) => {
       const img = imgEl.attr('src');
       const quantity = parseInt(qtyEl.text().trim(), 10) || 1;
 
-      if (name && img && img.includes('scryfall')) {
+      if (name && img) {
         images.push({ name, img, quantity });
         console.log(`🃏 ${name} × ${quantity}`);
-      } else {
-        console.warn('⚠️ Skipped a card — missing name/image/quantity');
       }
     });
 
-    console.log(`✅ Total cards extracted: ${images.length}`);
     res.json({ images });
   } catch (err) {
-    console.error('❌ Scraping failed:', err);
-    res.status(500).json({ error: 'Failed to scrape Archidekt deck page' });
+    console.error('❌ Puppeteer scrape failed:', err);
+    res.status(500).json({ error: 'Scraping with Puppeteer failed' });
   }
 });
 
 app.get('/', (req, res) => {
-  res.send('✅ MTG Proxy Scraper API (with HTML logging) is running');
+  res.send('✅ MTG Proxy API (with Puppeteer) is running');
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
