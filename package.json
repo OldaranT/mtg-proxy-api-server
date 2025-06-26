@@ -1,29 +1,31 @@
 {
   "name": "mtg-proxy-api-server",
   "version": "1.0.0",
-  "description": "A Puppeteer-powered proxy image scraper for Archidekt MTG decks",
+  "description": "Proxy API server to fetch and convert Archidekt decklists into card images using Puppeteer and Scryfall.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "keywords": [
+    "mtg",
+    "proxy",
+    "archidekt",
+    "puppeteer",
+    "scryfall",
+    "card-images"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
   "dependencies": {
-    "cheerio": "^1.0.0-rc.12",
-    "cors": "^2.8.5",
-    "express": "^4.18.2",
+    "express": "^4.19.2",
     "node-fetch": "^3.3.2",
-    "puppeteer": "^24.10.2"
+    "puppeteer": "^22.8.2"
   },
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": [
-    "puppeteer",
-    "mtg",
-    "archidekt",
-    "proxy",
-    "scryfall",
-    "scraper"
-  ],
-  "author": "You",
-  "license": "MIT"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/mtg-proxy-api-server.git"
+  }
 }

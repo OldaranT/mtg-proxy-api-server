@@ -8,11 +8,14 @@ const PORT = process.env.PORT || 3000;
 app.get('/api/archidekt/:deckId', async (req, res) => {
   const deckId = req.params.deckId;
   const url = `https://archidekt.com/decks/${deckId}/view`;
+  const debugLog = req.query.log === 'true';
 
   console.log(`🔍 Scraping Archidekt deck: ${url}`);
 
+  let browser;
+
   try {
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: 'new',
       args: [
         '--no-sandbox',
@@ -27,10 +30,9 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
     const [page] = await browser.pages();
     const context = browser.defaultBrowserContext();
 
-    // ✅ Force deckView to table view via cookie
     await context.setCookie({
       name: 'deckView',
-      value: '4', // table view
+      value: '4',
       domain: 'archidekt.com',
       path: '/',
       httpOnly: false,
@@ -39,9 +41,13 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
+    if (debugLog) {
+      const html = await page.content();
+      console.log("📝 DEBUG HTML:", html.substring(0, 2000)); // print first 2k chars
+    }
+
     console.log("📄 Page loaded, extracting cards...");
 
-    // Extract card names + quantities from table view
     const cards = await page.evaluate(() => {
       const rows = document.querySelectorAll('.table_row__yAAZX');
       const extracted = [];
@@ -66,9 +72,9 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
 
     for (const card of cards) {
       try {
-        const res = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
-        const data = await res.json();
-        const img = data.image_uris?.normal || data.card_faces?.[0]?.image_uris?.normal;
+        const scryRes = await fetch(`https://api.scryfall.com/cards/named?exact=${encodeURIComponent(card.name)}`);
+        const cardData = await scryRes.json();
+        const img = cardData.image_uris?.normal || cardData.card_faces?.[0]?.image_uris?.normal;
 
         if (img) {
           images.push({
@@ -77,19 +83,24 @@ app.get('/api/archidekt/:deckId', async (req, res) => {
             quantity: card.quantity
           });
         } else {
-          console.warn(`⚠️ No image found for: ${card.name}`);
+          console.warn(`⚠️ No image for ${card.name}`);
         }
       } catch (err) {
-        console.error(`❌ Scryfall fetch error for ${card.name}:`, err.message);
+        console.error(`❌ Scryfall error for ${card.name}: ${err.message}`);
       }
     }
 
-    await browser.close();
-    console.log(`📦 Done. Sending ${images.length} images to client.`);
+    console.log(`📦 Done. Returning ${images.length} images to client.`);
     res.json({ images });
+
   } catch (err) {
-    console.error("❌ Error scraping Archidekt:", err);
-    res.status(500).json({ error: "Scraping failed", details: err.message });
+    console.error("❌ Scrape failed:", err);
+    res.status(500).json({ error: 'Scraping failed', details: err.message });
+
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
 });
 
