@@ -1,7 +1,6 @@
-# Use official Node.js base image
 FROM node:20-slim
 
-# Install required system dependencies for Puppeteer (Chromium)
+# Install necessary system dependencies
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
@@ -21,26 +20,23 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     xdg-utils \
     --no-install-recommends && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /usr/src/app
 
-# Copy and install dependencies
+# Copy package.json and lock file (if it exists)
 COPY package.json ./
 COPY package-lock.json ./
+
+# Install dependencies (includes Puppeteer + Chromium)
 RUN npm install
 
-# Copy rest of the project
+# Copy the rest of the app
 COPY . .
 
-# Puppeteer requires this for headless Chromium
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-
-# Expose the port
+# Expose app port
 EXPOSE 3000
 
-# Start the app
+# Run the server
 CMD ["npm", "start"]
