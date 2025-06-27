@@ -48,7 +48,7 @@ async function scrapeArchidekt(deckId, res) {
       secure: true
     });
 
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 900000 });
     console.log("📄 [Archidekt] Page loaded, extracting cards...");
 
     const cards = await page.evaluate(() => {
@@ -151,7 +151,7 @@ async function scrapeMoxfield(deckId, res) {
       secure: true
     });
 
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 900000 });
     console.log("📄 [Moxfield] Page loaded, extracting cards...");
 
     const cards = await page.evaluate(() => {
