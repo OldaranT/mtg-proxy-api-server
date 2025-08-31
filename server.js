@@ -40,7 +40,7 @@ async function scrapeArchidekt(deckId, res) {
 
     const page = await browser.newPage();
 
-    // Force table view so rows are consistent
+    // Force table view
     await page.setCookie({
       name: 'deckView',
       value: '4',
@@ -53,78 +53,104 @@ async function scrapeArchidekt(deckId, res) {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 900000 });
     console.log("📄 [Archidekt] Page loaded, extracting cards...");
 
-    const { cards, categoryOrder } = await page.evaluate(() => {
-      // Helper to normalize text
-      const txt = (el) => (el?.textContent || '').trim();
-
+    const cards = await page.evaluate(() => {
       const rows = document.querySelectorAll('[class^="table_row"]');
       const data = [];
-      const order = []; // preserves first-seen category order
 
       rows.forEach((row, index) => {
         try {
           const nameEl  = row.querySelector('[class^="spreadsheetCard_cursorCard"] span');
           const qtyEl   = row.querySelector('[class^="spreadsheetCard_quantity"] input[type="number"]');
-          const finish  = row.querySelector('[class^="spreadsheetCard_modifier"] button');
-          const setInp  = row.querySelector('[class^="spreadsheetCard_setName"] input');
+          const finishBtn = row.querySelector('[class^="spreadsheetCard_modifier"] button');
+          const setInput  = row.querySelector('[class^="spreadsheetCard_setName"] input');
 
-          // Category trigger (hashed class in Archidekt builds)
-          // Use a robust contains-selector so it keeps working if hash suffix changes.
-          const catBtn  = row.querySelector('button[class*="simpleCategorySelection_trigger"]');
+          // Category button (hash changes across builds, so match by partial)
+          const catBtn = row.querySelector('button[class*="simpleCategorySelection_trigger"]');
 
-          if (nameEl && qtyEl && finish && setInp) {
-            const name = txt(nameEl);
+          if (nameEl && qtyEl && finishBtn && setInput) {
+            const name = nameEl.textContent.trim();
             const quantity = parseInt(qtyEl.value, 10) || 1;
-            const foil = txt(finish).toLowerCase() === 'foil';
+            const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
+            const category = (catBtn?.textContent?.trim()) || 'Uncategorized';
 
-            const setText = setInp.placeholder || setInp.value || '';
-            const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
-            const setCode = match?.[1];
-            const collectorNumber = match?.[2];
+            // e.g. "Innistrad: Midnight Hunt (MID) (123a)"
+            const setText = setInput.placeholder || setInput.value || '';
 
-            // Category text; fall back to "Uncategorized" when missing
-            let category = txt(catBtn) || 'Uncategorized';
+            // allow letters and hyphens in collector numbers (123a, 123b, 12a★, etc.)
+            // pair the last two (...) groups as set code and collector number
+            const parens = [...setText.matchAll(/\(([^)]+)\)/g)].map(m => m[1]);
+            let setCode, collectorNumber;
+            if (parens.length >= 2) {
+              setCode = parens[parens.length - 2].trim();
+              collectorNumber = parens[parens.length - 1].trim();
+            }
 
             if (name && setCode && collectorNumber) {
-              const rowObj = { name, quantity, foil, setCode, collectorNumber, category };
-              data.push(rowObj);
-
-              if (!order.includes(category)) order.push(category);
-
-              console.log(`🟢 [${index}] Added: ${name} (${quantity}) — ${foil ? 'Foil' : 'Normal'} — ${setCode} #${collectorNumber} — [${category}]`);
+              data.push({ name, quantity, foil, setCode, collectorNumber, category });
+              // console.log(`🟢 [${index}] ${name} x${quantity} — ${setCode} #${collectorNumber} — ${category}`);
             } else {
-              console.warn(`⚠️ [${index}] Missing fields: name="${name}", set="${setText}", category="${category}"`);
+              // console.warn(`⚠️ [${index}] Missing fields: name="${name}", set="${setText}"`);
             }
-          } else {
-            console.warn(`⚠️ [${index}] Incomplete row — skipping.`);
           }
         } catch (err) {
-          console.error(`❌ [${index}] Error parsing row:`, err);
+          // console.error(`❌ [${index}] Error parsing row:`, err);
         }
       });
 
-      return { cards: data, categoryOrder: order };
+      return data;
     });
 
     await browser.close();
 
-    console.log(`✅ [Archidekt] Extracted ${cards.length} card(s).`);
+    console.log(`✅ [Archidekt] Extracted ${cards.length} row(s).`);
     const images = [];
 
+    // Helper: pick an image URL (front face if multi-face)
+    const pickImageUrl = (cardObj) => {
+      // prefer high-res PNG if present; fall back to 'normal'
+      const pickFromUris = (uris) => uris?.png || uris?.large || uris?.normal || uris?.border_crop || uris?.art_crop;
+
+      if (cardObj.image_uris) {
+        return pickFromUris(cardObj.image_uris);
+      }
+      if (Array.isArray(cardObj.card_faces) && cardObj.card_faces.length) {
+        // face 0 is the FRONT when printed
+        const front = cardObj.card_faces[0];
+        if (front.image_uris) return pickFromUris(front.image_uris);
+      }
+      return null;
+    };
+
     for (const card of cards) {
-      const apiUrl = `https://api.scryfall.com/cards/${card.setCode}/${card.collectorNumber}`;
-      console.log(`🔗 [Scryfall] Fetching ${card.name} → ${apiUrl}`);
+      // Scryfall supports alphanumeric collector numbers directly
+      // https://api.scryfall.com/cards/{code}/{collector_number}
+      const apiUrl = `https://api.scryfall.com/cards/${encodeURIComponent(card.setCode)}/${encodeURIComponent(card.collectorNumber)}`;
+      console.log(`🔗 [Scryfall] ${card.name} → ${apiUrl}`);
 
       try {
         const response = await fetch(apiUrl);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
         const data = await response.json();
-        const img = data.image_uris?.normal;
+
+        let img = pickImageUrl(data);
+
+        // Fallback search by set + collector if direct fetch failed to yield an image
+        if (!img) {
+          const searchUrl = `https://api.scryfall.com/cards/search?q=set%3A${encodeURIComponent(card.setCode)}+cn%3A${encodeURIComponent(card.collectorNumber)}`;
+          const resp2 = await fetch(searchUrl);
+          if (resp2.ok) {
+            const js = await resp2.json();
+            const first = js.data?.[0];
+            img = first ? pickImageUrl(first) : null;
+          }
+        }
 
         if (img) {
-          // include category on the returned item
           images.push({ ...card, img });
         } else {
-          console.warn(`⚠️ [Scryfall] No image for ${card.name}`);
+          console.warn(`⚠️ [Scryfall] No image for ${card.name} (${card.setCode} #${card.collectorNumber})`);
         }
       } catch (err) {
         console.error(`❌ [Scryfall] Error for ${card.name}: ${err.message}`);
@@ -132,8 +158,7 @@ async function scrapeArchidekt(deckId, res) {
     }
 
     console.log(`📦 [Archidekt] Done. Returning ${images.length} image(s).`);
-    // include categoryOrder for clients that want to respect the original order
-    res.json({ images, categoryOrder });
+    res.json({ images });
 
   } catch (err) {
     console.error("❌ [Archidekt] Scraping failed:", err);
