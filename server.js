@@ -26,6 +26,8 @@ app.get('/api/deck', async (req, res) => {
 });
 
 // -------- ARCHIDEKT SCRAPER --------
+// server.js — replace your existing scrapeArchidekt(...) with this version
+
 async function scrapeArchidekt(deckId, res) {
   const url = `https://archidekt.com/decks/${deckId}/view`;
   console.log(`🔍 [Archidekt] Scraping deck: ${url}`);
@@ -38,7 +40,7 @@ async function scrapeArchidekt(deckId, res) {
 
     const page = await browser.newPage();
 
-    // Force table view
+    // Force table view so rows are consistent
     await page.setCookie({
       name: 'deckView',
       value: '4',
@@ -51,32 +53,47 @@ async function scrapeArchidekt(deckId, res) {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 900000 });
     console.log("📄 [Archidekt] Page loaded, extracting cards...");
 
-    const cards = await page.evaluate(() => {
+    const { cards, categoryOrder } = await page.evaluate(() => {
+      // Helper to normalize text
+      const txt = (el) => (el?.textContent || '').trim();
+
       const rows = document.querySelectorAll('[class^="table_row"]');
       const data = [];
+      const order = []; // preserves first-seen category order
 
       rows.forEach((row, index) => {
         try {
-          const nameEl = row.querySelector('[class^="spreadsheetCard_cursorCard"] span');
-          const qtyEl = row.querySelector('[class^="spreadsheetCard_quantity"] input[type="number"]');
-          const finishBtn = row.querySelector('[class^="spreadsheetCard_modifier"] button');
-          const setInput = row.querySelector('[class^="spreadsheetCard_setName"] input');
+          const nameEl  = row.querySelector('[class^="spreadsheetCard_cursorCard"] span');
+          const qtyEl   = row.querySelector('[class^="spreadsheetCard_quantity"] input[type="number"]');
+          const finish  = row.querySelector('[class^="spreadsheetCard_modifier"] button');
+          const setInp  = row.querySelector('[class^="spreadsheetCard_setName"] input');
 
-          if (nameEl && qtyEl && finishBtn && setInput) {
-            const name = nameEl.textContent.trim();
+          // Category trigger (hashed class in Archidekt builds)
+          // Use a robust contains-selector so it keeps working if hash suffix changes.
+          const catBtn  = row.querySelector('button[class*="simpleCategorySelection_trigger"]');
+
+          if (nameEl && qtyEl && finish && setInp) {
+            const name = txt(nameEl);
             const quantity = parseInt(qtyEl.value, 10) || 1;
-            const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
+            const foil = txt(finish).toLowerCase() === 'foil';
 
-            const setText = setInput.placeholder || setInput.value || '';
+            const setText = setInp.placeholder || setInp.value || '';
             const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
             const setCode = match?.[1];
             const collectorNumber = match?.[2];
 
+            // Category text; fall back to "Uncategorized" when missing
+            let category = txt(catBtn) || 'Uncategorized';
+
             if (name && setCode && collectorNumber) {
-              data.push({ name, quantity, foil, setCode, collectorNumber });
-              console.log(`🟢 [${index}] Added: ${name} (${quantity}) — ${foil ? 'Foil' : 'Normal'} — ${setCode} #${collectorNumber}`);
+              const rowObj = { name, quantity, foil, setCode, collectorNumber, category };
+              data.push(rowObj);
+
+              if (!order.includes(category)) order.push(category);
+
+              console.log(`🟢 [${index}] Added: ${name} (${quantity}) — ${foil ? 'Foil' : 'Normal'} — ${setCode} #${collectorNumber} — [${category}]`);
             } else {
-              console.warn(`⚠️ [${index}] Missing fields: name="${name}", set="${setText}"`);
+              console.warn(`⚠️ [${index}] Missing fields: name="${name}", set="${setText}", category="${category}"`);
             }
           } else {
             console.warn(`⚠️ [${index}] Incomplete row — skipping.`);
@@ -86,7 +103,7 @@ async function scrapeArchidekt(deckId, res) {
         }
       });
 
-      return data;
+      return { cards: data, categoryOrder: order };
     });
 
     await browser.close();
@@ -104,6 +121,7 @@ async function scrapeArchidekt(deckId, res) {
         const img = data.image_uris?.normal;
 
         if (img) {
+          // include category on the returned item
           images.push({ ...card, img });
         } else {
           console.warn(`⚠️ [Scryfall] No image for ${card.name}`);
@@ -114,13 +132,15 @@ async function scrapeArchidekt(deckId, res) {
     }
 
     console.log(`📦 [Archidekt] Done. Returning ${images.length} image(s).`);
-    res.json({ images });
+    // include categoryOrder for clients that want to respect the original order
+    res.json({ images, categoryOrder });
 
   } catch (err) {
     console.error("❌ [Archidekt] Scraping failed:", err);
     res.status(500).json({ error: "Scraping failed", details: err.message });
   }
 }
+
 
 // -------- MOXFIELD SCRAPER --------
 async function scrapeMoxfield(deckId, res) {
