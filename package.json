@@ -18,7 +18,9 @@
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
+    "crypto": "^1.0.1",
     "express": "^4.19.2",
+    "lru-cache": "^11.1.0",
     "node-fetch": "^3.3.2",
     "puppeteer": "^22.8.2"
   },
