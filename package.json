@@ -18,14 +18,12 @@
   "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
-    "crypto": "^1.0.1",
-    "express": "^4.19.2",
-    "lru-cache": "^11.1.0",
-    "node-fetch": "^3.3.2",
-    "puppeteer": "^22.8.2"
+    "express": "^4.21.2",
+    "lru-cache": "^10.2.2",
+    "puppeteer": "^22.15.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.17.0"
   },
   "repository": {
     "type": "git",

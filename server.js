@@ -3,7 +3,9 @@ const cors = require('cors');
 const puppeteer = require('puppeteer');
 const crypto = require('crypto');
 const LRU = require('lru-cache');
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+
+// Use native fetch (Node 18+)
+const fetch = (...args) => globalThis.fetch(...args);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -76,7 +78,10 @@ function withinSWR(rec) {
 
 function setClientCacheHeaders(res, etag) {
   // Let clients cache the JSON; browsers/proxies can revalidate.
-  res.setHeader('Cache-Control', `public, max-age=${Math.floor(FRESH_TTL_MS/1000)}, stale-while-revalidate=${Math.floor((SWR_TTL_MS - FRESH_TTL_MS)/1000)}`);
+  res.setHeader(
+    'Cache-Control',
+    `public, max-age=${Math.floor(FRESH_TTL_MS/1000)}, stale-while-revalidate=${Math.floor((SWR_TTL_MS - FRESH_TTL_MS)/1000)}`
+  );
   res.setHeader('ETag', etag);
 }
 
@@ -326,7 +331,6 @@ app.get('/api/deck', async (req, res) => {
       return res.status(400).json({ error: 'Unsupported deck provider' });
     }
 
-    const key = `${provider}:${deckId}`;
     const rec = await getDeckCached(provider, deckId);
 
     // Client-side conditional
