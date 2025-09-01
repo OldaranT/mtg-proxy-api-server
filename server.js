@@ -27,7 +27,6 @@ app.get('/api/deck', async (req, res) => {
 
 // -------- ARCHIDEKT SCRAPER --------
 // server.js — replace your existing scrapeArchidekt(...) with this version
-
 async function scrapeArchidekt(deckId, res) {
   const url = `https://archidekt.com/decks/${deckId}/view`;
   console.log(`🔍 [Archidekt] Scraping deck: ${url}`);
@@ -59,41 +58,35 @@ async function scrapeArchidekt(deckId, res) {
 
       rows.forEach((row, index) => {
         try {
-          const nameEl  = row.querySelector('[class^="spreadsheetCard_cursorCard"] span');
-          const qtyEl   = row.querySelector('[class^="spreadsheetCard_quantity"] input[type="number"]');
+          const nameEl = row.querySelector('[class^="spreadsheetCard_cursorCard"] span');
+          const qtyEl = row.querySelector('[class^="spreadsheetCard_quantity"] input[type="number"]');
           const finishBtn = row.querySelector('[class^="spreadsheetCard_modifier"] button');
-          const setInput  = row.querySelector('[class^="spreadsheetCard_setName"] input');
-
-          // Category button (hash changes across builds, so match by partial)
-          const catBtn = row.querySelector('button[class*="simpleCategorySelection_trigger"]');
+          const setInput = row.querySelector('[class^="spreadsheetCard_setName"] input');
+          const catEl = row.querySelector('[class^="simpleCategorySelection_trigger"]'); // category
 
           if (nameEl && qtyEl && finishBtn && setInput) {
             const name = nameEl.textContent.trim();
             const quantity = parseInt(qtyEl.value, 10) || 1;
             const foil = finishBtn.textContent.trim().toLowerCase() === 'foil';
-            const category = (catBtn?.textContent?.trim()) || 'Uncategorized';
 
-            // e.g. "Innistrad: Midnight Hunt (MID) (123a)"
             const setText = setInput.placeholder || setInput.value || '';
+            const match = setText.match(/\((\w+)\)\s*\((\d+)\)/);
+            const setCode = match?.[1];
+            const collectorNumber = match?.[2];
 
-            // allow letters and hyphens in collector numbers (123a, 123b, 12a★, etc.)
-            // pair the last two (...) groups as set code and collector number
-            const parens = [...setText.matchAll(/\(([^)]+)\)/g)].map(m => m[1]);
-            let setCode, collectorNumber;
-            if (parens.length >= 2) {
-              setCode = parens[parens.length - 2].trim();
-              collectorNumber = parens[parens.length - 1].trim();
-            }
+            const category = (catEl?.textContent || 'Uncategorized').trim();
 
             if (name && setCode && collectorNumber) {
               data.push({ name, quantity, foil, setCode, collectorNumber, category });
-              // console.log(`🟢 [${index}] ${name} x${quantity} — ${setCode} #${collectorNumber} — ${category}`);
+              console.log(`🟢 [${index}] ${name} x${quantity} — ${foil ? 'Foil' : 'Normal'} — ${setCode} #${collectorNumber} — ${category}`);
             } else {
-              // console.warn(`⚠️ [${index}] Missing fields: name="${name}", set="${setText}"`);
+              console.warn(`⚠️ [${index}] Missing fields: name="${name}", set="${setText}"`);
             }
+          } else {
+            console.warn(`⚠️ [${index}] Incomplete row — skipping.`);
           }
         } catch (err) {
-          // console.error(`❌ [${index}] Error parsing row:`, err);
+          console.error(`❌ [${index}] Error parsing row:`, err);
         }
       });
 
@@ -102,55 +95,39 @@ async function scrapeArchidekt(deckId, res) {
 
     await browser.close();
 
-    console.log(`✅ [Archidekt] Extracted ${cards.length} row(s).`);
+    console.log(`✅ [Archidekt] Extracted ${cards.length} card(s).`);
     const images = [];
 
-    // Helper: pick an image URL (front face if multi-face)
-    const pickImageUrl = (cardObj) => {
-      // prefer high-res PNG if present; fall back to 'normal'
-      const pickFromUris = (uris) => uris?.png || uris?.large || uris?.normal || uris?.border_crop || uris?.art_crop;
-
-      if (cardObj.image_uris) {
-        return pickFromUris(cardObj.image_uris);
-      }
-      if (Array.isArray(cardObj.card_faces) && cardObj.card_faces.length) {
-        // face 0 is the FRONT when printed
-        const front = cardObj.card_faces[0];
-        if (front.image_uris) return pickFromUris(front.image_uris);
-      }
-      return null;
-    };
-
+    // Fetch Scryfall images (front + back for DFC)
     for (const card of cards) {
-      // Scryfall supports alphanumeric collector numbers directly
-      // https://api.scryfall.com/cards/{code}/{collector_number}
-      const apiUrl = `https://api.scryfall.com/cards/${encodeURIComponent(card.setCode)}/${encodeURIComponent(card.collectorNumber)}`;
-      console.log(`🔗 [Scryfall] ${card.name} → ${apiUrl}`);
+      const apiUrl = `https://api.scryfall.com/cards/${card.setCode}/${card.collectorNumber}`;
+      console.log(`🔗 [Scryfall] Fetching ${card.name} → ${apiUrl}`);
 
       try {
         const response = await fetch(apiUrl);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
         const data = await response.json();
 
-        let img = pickImageUrl(data);
+        let imgFront = null;
+        let imgBack = null;
 
-        // Fallback search by set + collector if direct fetch failed to yield an image
-        if (!img) {
-          const searchUrl = `https://api.scryfall.com/cards/search?q=set%3A${encodeURIComponent(card.setCode)}+cn%3A${encodeURIComponent(card.collectorNumber)}`;
-          const resp2 = await fetch(searchUrl);
-          if (resp2.ok) {
-            const js = await resp2.json();
-            const first = js.data?.[0];
-            img = first ? pickImageUrl(first) : null;
-          }
+        if (Array.isArray(data.card_faces) && data.card_faces.length >= 2) {
+          // Double-faced layout (transform / modal_dfc / etc.)
+          imgFront = data.card_faces[0]?.image_uris?.normal || data.image_uris?.normal || null;
+          imgBack  = data.card_faces[1]?.image_uris?.normal || null;
+        } else {
+          // Single face (normal, leveler, etc.)
+          imgFront = data.image_uris?.normal || null;
+          imgBack = null; // client will substitute custom back for singles
         }
 
-        if (img) {
-          images.push({ ...card, img });
+        if (imgFront) {
+          images.push({
+            ...card,
+            img: imgFront,
+            backImg: imgBack // null for single-faced; real art for DFC
+          });
         } else {
-          console.warn(`⚠️ [Scryfall] No image for ${card.name} (${card.setCode} #${card.collectorNumber})`);
+          console.warn(`⚠️ [Scryfall] No front image for ${card.name}`);
         }
       } catch (err) {
         console.error(`❌ [Scryfall] Error for ${card.name}: ${err.message}`);
@@ -158,7 +135,10 @@ async function scrapeArchidekt(deckId, res) {
     }
 
     console.log(`📦 [Archidekt] Done. Returning ${images.length} image(s).`);
-    res.json({ images });
+    // (Optional) Provide a category ordering as encountered on page
+    const categoryOrder = Array.from(new Set(images.map(c => c.category || 'Uncategorized')));
+
+    res.json({ images, categoryOrder });
 
   } catch (err) {
     console.error("❌ [Archidekt] Scraping failed:", err);
