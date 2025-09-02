@@ -1,9 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer'); // kept for Moxfield only
-const crypto = require('crypto');       // built-in (no npm dep)
-const LRU = require('lru-cache');
-const LRUCache = LRU.LRUCache || LRU;   // v11+ or older interop
+const crypto = require('crypto');
+let LRUCache;
+try {
+  // lru-cache v11+
+  ({ LRUCache } = require('lru-cache'));
+} catch {
+  // older versions export the class as default
+  const LRU = require('lru-cache');
+  LRUCache = LRU.LRUCache || LRU;
+}
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const app = express();
@@ -16,23 +23,23 @@ app.set('etag', false); // we'll manage ETag ourselves
    Caches
    ========================= */
 
-const deckCache = new LRUCache({ max: 500 }); // Archidekt + Moxfield
+const deckCache = new LRUCache({ max: 500 });
 const inFlight = new Map();
 
-// Scryfall cache (JSON, with conditional headers)
 const scryCache = new LRUCache({
   max: 8000,
   ttl: 1000 * 60 * 60 * 24 * 30, // 30 days
 });
 
-/* Moxfield freshness/SWR (Archidekt uses updatedAt instead) */
+/* =========================
+   Moxfield freshness/SWR
+   ========================= */
 const MOX_FRESH_MS = 5 * 60 * 1000;
 const MOX_SWR_MS = 60 * 60 * 1000;
 
 /* =========================
    Helpers
    ========================= */
-
 function hashJSON(obj) {
   return crypto.createHash('sha1').update(JSON.stringify(obj)).digest('hex');
 }
@@ -47,18 +54,21 @@ function setNoCacheWithETag(res, etag) {
   res.setHeader('ETag', etag);
 }
 
-// defensive getter
 const get = (o, path, d = null) =>
   path.split('.').reduce((v, k) => (v && v[k] !== undefined ? v[k] : undefined), o) ?? d;
 
 /* =========================
    Scryfall helpers
    ========================= */
-
 async function fetchScryfallCardBySetNum(setCode, collectorNumber) {
-  const key = `setnum:${setCode}/${collectorNumber}`;
+  // Scryfall expects lowercase set codes
+  const set = String(setCode || '').toLowerCase().trim();
+  const cn = String(collectorNumber || '').trim();
+  if (!set || !cn) throw new Error('missing set/collectorNumber');
+
+  const key = `setnum:${set}/${cn}`;
   const cached = scryCache.get(key);
-  const url = `https://api.scryfall.com/cards/${setCode}/${collectorNumber}`;
+  const url = `https://api.scryfall.com/cards/${encodeURIComponent(set)}/${encodeURIComponent(cn)}`;
   const headers = {};
   if (cached?.etag) headers['If-None-Match'] = cached.etag;
   if (cached?.lastModified) headers['If-Modified-Since'] = cached.lastModified;
@@ -99,9 +109,8 @@ async function fetchScryfallByNameExact(name) {
 }
 
 /* =========================
-   Archidekt via API (no scraping)
+   Archidekt via API
    ========================= */
-
 async function fetchArchidektSmall(deckId) {
   const url = `https://archidekt.com/api/decks/${deckId}/small/`;
   const resp = await fetch(url, {
@@ -132,61 +141,76 @@ async function fetchArchidektDeck(deckId) {
   return resp.json();
 }
 
-// Parse Archidekt full deck JSON into rows we can hydrate with Scryfall
+function choosePrimaryCategory(cardCats, deckCategoryOrder) {
+  if (!Array.isArray(cardCats) || cardCats.length === 0) return 'Uncategorized';
+  if (Array.isArray(deckCategoryOrder) && deckCategoryOrder.length) {
+    for (const cat of deckCategoryOrder) {
+      if (cardCats.includes(cat)) return cat;
+    }
+  }
+  return cardCats[0];
+}
+
 function parseArchidektRows(deckJson) {
-  const catMap = new Map((deckJson.categories || []).map(c => [c.id, c.name]));
+  const deckCategoryOrder = (deckJson.categories || []).map(c => c.name);
   const rows = [];
 
   for (const it of deckJson.cards || []) {
     const name =
-      get(it, 'card.name') ||
       get(it, 'card.oracleCard.name') ||
+      get(it, 'card.displayName') ||
+      get(it, 'card.name') ||
       it.name ||
       '';
 
     const quantity = it.quantity ?? it.count ?? 1;
 
-    // category: prefer mapping via categoryId
-    const category =
-      (it.categoryId && catMap.get(it.categoryId)) ||
-      it.category ||
-      'Uncategorized';
+    // Categories: array of strings straight from Archidekt
+    const categoriesArr = Array.isArray(it.categories) ? it.categories.slice() : [];
+    const primaryCategory = choosePrimaryCategory(categoriesArr, deckCategoryOrder);
 
-    // finish (foil vs nonfoil)
-    const finish = (it.finish || it.modifier || '').toString().toLowerCase();
-    const foil = finish.includes('foil');
+    // Foil from modifier field
+    const foil = /foil/i.test(it.modifier || '');
 
-    // printing info — try several shapes Archidekt may use
-    const setCode =
-      get(it, 'card.edition.set.code') ||
-      get(it, 'card.edition.code') ||
-      get(it, 'card.set.code') ||
-      get(it, 'edition.code') ||
-      it.setCode ||
-      null;
-
+    // Printing: Archidekt stores collectorNumber + edition.editioncode
     const collectorNumber =
-      get(it, 'card.edition.collectorNumber') ||
       get(it, 'card.collectorNumber') ||
-      it.collectorNumber ||
+      get(it, 'collectorNumber') ||
       null;
 
-    rows.push({ name, quantity, foil, setCode, collectorNumber, category });
+    const setCode =
+      get(it, 'card.edition.editioncode') ||
+      get(it, 'edition.editioncode') ||
+      null;
+
+    rows.push({
+      name,
+      quantity,
+      foil,
+      categories: categoriesArr,
+      category: primaryCategory,         // keep for grouping
+      setCode: setCode ? String(setCode).toLowerCase() : null,
+      collectorNumber: collectorNumber ? String(collectorNumber) : null,
+    });
   }
 
-  return rows.filter(r => r.name && r.quantity > 0);
+  return { rows, deckCategoryOrder };
 }
 
-async function hydrateRowsToPayload(rows, { provider, deckId }) {
+async function hydrateRowsToPayload(rows, meta) {
   const images = [];
 
   for (const card of rows) {
     try {
       let data;
       if (card.setCode && card.collectorNumber) {
-        data = await fetchScryfallCardBySetNum(card.setCode, card.collectorNumber);
+        try {
+          data = await fetchScryfallCardBySetNum(card.setCode, card.collectorNumber);
+        } catch (e) {
+          // Fallback if a particular printing code doesn't exist on Scryfall
+          data = await fetchScryfallByNameExact(card.name);
+        }
       } else {
-        // fallback if Archidekt didn’t provide printing — use name
         data = await fetchScryfallByNameExact(card.name);
       }
 
@@ -203,7 +227,13 @@ async function hydrateRowsToPayload(rows, { provider, deckId }) {
 
       if (imgFront) {
         images.push({
-          ...card,
+          name: card.name,
+          quantity: card.quantity,
+          foil: card.foil,
+          categories: card.categories,
+          category: card.category,
+          setCode: card.setCode,
+          collectorNumber: card.collectorNumber,
           img: imgFront,
           backImg: imgBack || null,
         });
@@ -213,8 +243,16 @@ async function hydrateRowsToPayload(rows, { provider, deckId }) {
     }
   }
 
-  const categoryOrder = Array.from(new Set(images.map(c => c.category || 'Uncategorized')));
-  return { images, categoryOrder, provider, deckId };
+  const categoryOrder = meta.categoryOrder && meta.categoryOrder.length
+    ? meta.categoryOrder
+    : Array.from(new Set(images.flatMap(c => c.categories?.length ? c.categories : [c.category || 'Uncategorized'])));
+
+  return {
+    images,
+    categoryOrder,
+    provider: meta.provider,
+    deckId: meta.deckId,
+  };
 }
 
 async function resolveArchidekt(deckId) {
@@ -222,7 +260,6 @@ async function resolveArchidekt(deckId) {
   if (inFlight.has(key)) return inFlight.get(key);
 
   const p = (async () => {
-    // 1) cheap change check
     let small;
     try {
       small = await fetchArchidektSmall(deckId);
@@ -233,18 +270,19 @@ async function resolveArchidekt(deckId) {
 
     const cached = deckCache.get(key);
     if (cached && remoteUpdatedAt && cached.archidektUpdatedAt === remoteUpdatedAt) {
-      // up to date — skip full download
       return cached;
     }
 
-    // 2) fetch full deck and rebuild
     const deckJson = await fetchArchidektDeck(deckId);
-    const rows = parseArchidektRows(deckJson);
-    const payload = await hydrateRowsToPayload(rows, { provider: 'archidekt', deckId });
+    const { rows, deckCategoryOrder } = parseArchidektRows(deckJson);
+    const payload = await hydrateRowsToPayload(rows, {
+      provider: 'archidekt',
+      deckId,
+      categoryOrder: deckCategoryOrder,
+    });
 
-    // stable fingerprint for debugging (not used for invalidation now)
     payload.deckHash = hashJSON(
-      payload.images.map(r => [r.name, r.quantity, r.foil, r.setCode, r.collectorNumber, r.category])
+      payload.images.map(r => [r.name, r.quantity, r.foil, r.setCode, r.collectorNumber, r.categories])
     );
 
     const rec = {
@@ -269,9 +307,8 @@ async function resolveArchidekt(deckId) {
 }
 
 /* =========================
-   Moxfield (unchanged, still Puppeteer)
+   Moxfield (unchanged)
    ========================= */
-
 function moxKey(deckId) {
   return `moxfield:${deckId}`;
 }
@@ -372,7 +409,6 @@ async function resolveMoxfield(deckId) {
 /* =========================
    Route
    ========================= */
-
 app.get('/api/deck', async (req, res) => {
   try {
     const deckUrl = req.query.url;
@@ -395,7 +431,6 @@ app.get('/api/deck', async (req, res) => {
       ? await resolveArchidekt(deckId)
       : await resolveMoxfield(deckId);
 
-    // Client revalidation AFTER we ensured freshness/currentness
     const clientETag = req.headers['if-none-match'];
     if (clientETag && clientETag === rec.etag) {
       setNoCacheWithETag(res, rec.etag);
@@ -413,7 +448,6 @@ app.get('/api/deck', async (req, res) => {
 /* =========================
    Start
    ========================= */
-
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
