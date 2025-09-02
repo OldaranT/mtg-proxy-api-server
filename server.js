@@ -28,7 +28,8 @@ const MAX_DECKS    = 500;                // up to 500 distinct decks in memory
 //   etag: "W/....",
 //   deckHash: "abc123",
 //   freshUntil: <timestamp>,
-//   swrUntil: <timestamp>
+//   swrUntil: <timestamp>,
+//   pageSig: "<signature string>"
 // }
 const deckCache = new LRUCache({ max: MAX_DECKS });
 
@@ -40,6 +41,10 @@ const scryCache = new LRUCache({
   max: 8000,
   ttl: 1000 * 60 * 60 * 24 * 30, // 30 days
 });
+
+// User agent for preflight fetches (some hosts are picky)
+const UA =
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36';
 
 /* =========================
    Helpers
@@ -55,7 +60,7 @@ function weakEtagForPayload(payload) {
   return `W/"${h}"`;
 }
 
-function makeCacheRecord(payload) {
+function makeCacheRecord(payload, pageSig) {
   const now = Date.now();
   return {
     payload,
@@ -63,6 +68,7 @@ function makeCacheRecord(payload) {
     deckHash: payload.deckHash,
     freshUntil: now + FRESH_TTL_MS,
     swrUntil: now + SWR_TTL_MS,
+    pageSig: pageSig || null,
   };
 }
 
@@ -71,6 +77,13 @@ function isFresh(rec) {
 }
 function withinSWR(rec) {
   return rec && Date.now() < rec.swrUntil;
+}
+
+function bumpFreshness(rec) {
+  const now = Date.now();
+  rec.freshUntil = now + FRESH_TTL_MS;
+  rec.swrUntil = now + SWR_TTL_MS;
+  return rec;
 }
 
 function setClientCacheHeaders(res, etag) {
@@ -82,6 +95,75 @@ function setClientCacheHeaders(res, etag) {
     )}`
   );
   res.setHeader('ETag', etag);
+}
+
+/* =========================
+   Page signature (preflight)
+   ========================= */
+
+function deckViewUrl(provider, deckId) {
+  return provider === 'archidekt'
+    ? `https://archidekt.com/decks/${deckId}/view`
+    : `https://www.moxfield.com/decks/${deckId}`;
+}
+
+/**
+ * Try HEAD first to get ETag/Last-Modified/Content-Length.
+ * If none or unsupported, GET the HTML shell and hash it.
+ * Returns a compact string signature (stable for equality checks).
+ */
+async function fetchPageSignature(url) {
+  // 1) HEAD
+  try {
+    const h = await fetch(url, {
+      method: 'HEAD',
+      headers: { 'User-Agent': UA, 'Cache-Control': 'no-cache' },
+      redirect: 'follow',
+    });
+    // Some CDNs respond 405 to HEAD; handle that
+    if (h.ok) {
+      const etag = (h.headers.get('etag') || '').trim();
+      const lastMod = (h.headers.get('last-modified') || '').trim();
+      const len = (h.headers.get('content-length') || '').trim();
+      if (etag || lastMod || len) {
+        return ['H', etag, lastMod, len].join('|');
+      }
+    }
+  } catch (e) {
+    // Swallow and fall through to GET
+  }
+
+  // 2) GET minimal HTML shell (no Puppeteer)
+  try {
+    const r = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': UA,
+        'Cache-Control': 'no-cache',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+      redirect: 'follow',
+    });
+    if (!r.ok) throw new Error(`GET ${r.status}`);
+    const etag = (r.headers.get('etag') || '').trim();
+    const lastMod = (r.headers.get('last-modified') || '').trim();
+    const len = (r.headers.get('content-length') || '').trim();
+    const text = await r.text();
+    // Normalize whitespace to reduce noise, then hash
+    const bodyHash = crypto
+      .createHash('sha1')
+      .update(text.replace(/\s+/g, ' ').slice(0, 1_000_000)) // cap at 1MB
+      .digest('hex');
+    return ['G', etag, lastMod, len, bodyHash].join('|');
+  } catch (e) {
+    // If even GET fails, return null → fallback to TTL behavior
+    return null;
+  }
+}
+
+async function fetchDeckPageSignature(provider, deckId) {
+  const url = deckViewUrl(provider, deckId);
+  return await fetchPageSignature(url);
 }
 
 /* =========================
@@ -261,53 +343,78 @@ async function scrapeMoxfield(deckId) {
 }
 
 /* =========================
-   Cache wrapper (SWR)
+   Cache wrapper with preflight signature
    ========================= */
 
-async function getDeckCached(provider, deckId) {
+async function getDeckCached(provider, deckId, { force = false } = {}) {
   const key = `${provider}:${deckId}`;
   const cached = deckCache.get(key);
 
-  if (isFresh(cached)) {
-    return cached; // serve fresh
+  // Force rebuild bypasses everything
+  if (force) {
+    return await buildAndCache(provider, deckId, key);
   }
 
-  // Serve stale while revalidate
+  // If still fresh, ship it
+  if (isFresh(cached)) {
+    return cached;
+  }
+
+  // Preflight: try to detect page changes cheaply
+  let sig = null;
+  try {
+    sig = await fetchDeckPageSignature(provider, deckId);
+  } catch (e) {
+    console.warn(`⚠️ preflight failed for ${key}: ${e.message}`);
+  }
+
+  // If we have a cached record and the page signature hasn't changed,
+  // just renew freshness and avoid a heavy scrape.
+  if (cached && sig && cached.pageSig === sig) {
+    const renewed = bumpFreshness(cached);
+    deckCache.set(key, renewed);
+    return renewed;
+  }
+
+  // If within SWR, serve stale and refresh if not already doing so.
   if (withinSWR(cached)) {
-    // Kick off refresh if not already running
     if (!inFlight.has(key)) {
       inFlight.set(
         key,
-        buildAndCache(provider, deckId, key)
+        buildAndCache(provider, deckId, key, sig)
           .catch((err) => console.error(`❌ refresh failed for ${key}:`, err))
           .finally(() => inFlight.delete(key))
       );
     }
-    return cached; // serve stale now
+    return cached;
   }
 
-  // Stale and outside SWR, we must rebuild synchronously
+  // Outside SWR: block on a rebuild (but dedupe)
   if (!inFlight.has(key)) {
     inFlight.set(
       key,
-      buildAndCache(provider, deckId, key).finally(() => inFlight.delete(key))
+      buildAndCache(provider, deckId, key, sig).finally(() => inFlight.delete(key))
     );
   }
-  try {
-    const rec = await inFlight.get(key);
-    return rec;
-  } catch (e) {
-    // If build fails but we still have any stale copy, return it as last resort
-    if (cached) return cached;
-    throw e;
-  }
+  const rec = await inFlight.get(key);
+  return rec;
 }
 
-async function buildAndCache(provider, deckId, key) {
+async function buildAndCache(provider, deckId, key, pageSigFromPreflight = null) {
   const fresh =
     provider === 'archidekt' ? await scrapeArchidekt(deckId) : await scrapeMoxfield(deckId);
 
-  const rec = makeCacheRecord(fresh);
+  // If we didn't preflight or signature failed, try to set one now (non-blocking)
+  let pageSig = pageSigFromPreflight;
+  if (!pageSig) {
+    try {
+      pageSig = await fetchDeckPageSignature(provider, deckId);
+    } catch {
+      pageSig = null;
+    }
+  }
+
+  const rec = makeCacheRecord(fresh, pageSig);
   deckCache.set(key, rec);
   return rec;
 }
@@ -319,6 +426,8 @@ async function buildAndCache(provider, deckId, key) {
 app.get('/api/deck', async (req, res) => {
   try {
     const deckUrl = req.query.url;
+    const force = req.query.force === '1' || req.query.force === 'true';
+
     if (!deckUrl) return res.status(400).json({ error: 'Missing deck URL' });
 
     let provider, deckId;
@@ -335,7 +444,7 @@ app.get('/api/deck', async (req, res) => {
       return res.status(400).json({ error: 'Unsupported deck provider' });
     }
 
-    const rec = await getDeckCached(provider, deckId);
+    const rec = await getDeckCached(provider, deckId, { force });
 
     // Client-side conditional
     const clientETag = req.headers['if-none-match'];
