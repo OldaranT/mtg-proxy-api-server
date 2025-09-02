@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const puppeteer = require('puppeteer');
-const crypto = require('crypto');
+const crypto = require('crypto'); // built-in (no npm dep)
 const LRU = require('lru-cache');
 const LRUCache = LRU.LRUCache || LRU; // v11+ or older
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
@@ -10,27 +10,27 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.set('etag', false);
+app.set('etag', false); // we'll control ETags
 
 /* =========================
    Caches
    ========================= */
 
-// Archidekt is strict (scan every request), but we still cache full payloads by deckId
+// One cache for all deck payloads (Archidekt + Moxfield)
 const deckCache = new LRUCache({ max: 500 });
 
-// Deduplicate concurrent work per deck
+// Deduplicate concurrent builds/checks
 const inFlight = new Map();
 
-// Scryfall JSON cache (uses HTTP 304 via ETag/Last-Modified)
+// Scryfall JSON cache (uses conditional requests)
 const scryCache = new LRUCache({
   max: 8000,
   ttl: 1000 * 60 * 60 * 24 * 30, // 30 days
 });
 
-// Moxfield: keep a modest TTL/SWR for sanity
+/* Moxfield fallback TTL/SWR (Archidekt is strict via updatedAt) */
 const MOX_FRESH_MS = 5 * 60 * 1000;
-const MOX_SWR_MS   = 60 * 60 * 1000;
+const MOX_SWR_MS = 60 * 60 * 1000;
 
 /* =========================
    Helpers
@@ -46,7 +46,7 @@ function weakEtagForPayload(payload) {
 }
 
 function setNoCacheWithETag(res, etag) {
-  // Force clients to revalidate every time → instant change detection
+  // clients must revalidate every time → instant change visibility
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('ETag', etag);
 }
@@ -80,11 +80,29 @@ async function fetchScryfallCard(setCode, collectorNumber) {
 }
 
 /* =========================
-   Archidekt (STRICT) — scan on every request
+   Archidekt — INSTANT change detection using updatedAt
    ========================= */
 
-// 1) Quick scan for rows + deckHash (no Scryfall yet)
-async function scanArchidektDeckMeta(deckId) {
+// Fast check: hit Archidekt's small API to get updatedAt
+async function getArchidektUpdatedAt(deckId) {
+  const url = `https://archidekt.com/api/decks/${deckId}/small/`;
+  const resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'mtg-proxy-api-server/1.0',
+      'Accept': 'application/json',
+    },
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`Archidekt small ${resp.status}: ${text || 'fetch error'}`);
+  }
+  const json = await resp.json();
+  // normalized ISO string (or null)
+  return json?.updatedAt || null;
+}
+
+// Scrape rows (names/qty/foil/set/cn/category)
+async function scrapeArchidektRows(deckId) {
   const url = `https://archidekt.com/decks/${deckId}/view`;
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -92,7 +110,6 @@ async function scanArchidektDeckMeta(deckId) {
   });
   try {
     const page = await browser.newPage();
-    // Force table view
     await page.setCookie({
       name: 'deckView',
       value: '4',
@@ -105,21 +122,22 @@ async function scanArchidektDeckMeta(deckId) {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 900000 });
 
     const rows = await page.evaluate(() => {
-      const rows = document.querySelectorAll('[class^="table_row"]');
+      const nodes = document.querySelectorAll('[class^="table_row"]');
       const out = [];
-      rows.forEach((row) => {
+      nodes.forEach((row) => {
         const nameEl = row.querySelector('[class^="spreadsheetCard_cursorCard"] span');
         const qtyEl = row.querySelector('[class^="spreadsheetCard_quantity"] input[type="number"]');
-        const finish = row.querySelector('[class^="spreadsheetCard_modifier"] button');
-        const setIn = row.querySelector('[class^="spreadsheetCard_setName"] input');
+        const finishBtn = row.querySelector('[class^="spreadsheetCard_modifier"] button');
+        const setInput = row.querySelector('[class^="spreadsheetCard_setName"] input');
         const catEl = row.querySelector('[class^="simpleCategorySelection_trigger"]');
-        if (!(nameEl && qtyEl && finish && setIn)) return;
+
+        if (!(nameEl && qtyEl && finishBtn && setInput)) return;
 
         const name = nameEl.textContent.trim();
         const quantity = parseInt(qtyEl.value, 10) || 1;
-        const foil = (finish.textContent || '').trim().toLowerCase() === 'foil';
+        const foil = (finishBtn.textContent || '').trim().toLowerCase() === 'foil';
 
-        const setText = setIn.placeholder || setIn.value || '';
+        const setText = setInput.placeholder || setInput.value || '';
         const m = setText.match(/\((\w+)\)\s*\((\d+)\)/);
         const setCode = m?.[1];
         const collectorNumber = m?.[2];
@@ -132,17 +150,12 @@ async function scanArchidektDeckMeta(deckId) {
       return out;
     });
 
-    const deckHash = hashJSON(
-      rows.map((r) => [r.name, r.quantity, r.foil, r.setCode, r.collectorNumber, r.category])
-    );
-
-    return { rows, deckHash };
+    return rows;
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
-// 2) Hydrate rows to full payload (with Scryfall)
 async function hydrateRowsToPayload(rows, { provider, deckId }) {
   const images = [];
   for (const card of rows) {
@@ -167,9 +180,7 @@ async function hydrateRowsToPayload(rows, { provider, deckId }) {
         });
       }
     } catch (e) {
-      console.warn(
-        `⚠️ [Scryfall fail] ${card.name} (${card.setCode}/${card.collectorNumber}): ${e.message}`
-      );
+      console.warn(`⚠️ [Scryfall fail] ${card.name} (${card.setCode}/${card.collectorNumber}): ${e.message}`);
     }
   }
 
@@ -177,42 +188,43 @@ async function hydrateRowsToPayload(rows, { provider, deckId }) {
   return { images, categoryOrder, provider, deckId };
 }
 
-// 3) Strict resolver used by the route
 async function resolveArchidekt(deckId) {
   const key = `archidekt:${deckId}`;
   if (inFlight.has(key)) return inFlight.get(key);
 
   const p = (async () => {
-    const cached = deckCache.get(key); // { payload, etag, deckHash }
-    const { rows, deckHash } = await scanArchidektDeckMeta(deckId);
+    const remoteUpdatedAt = await getArchidektUpdatedAt(deckId); // <— cheap, instant
 
-    // If deck unchanged, serve cached immediately (if any)
-    if (cached && cached.deckHash === deckHash) {
-      return cached; // no Scryfall work needed
+    const cached = deckCache.get(key);
+    // If we have a cached payload and updatedAt matches, we’re current
+    if (cached && cached.archidektUpdatedAt === remoteUpdatedAt) {
+      return cached;
     }
 
-    // Changed or cold start: build fresh payload from rows
-    const freshPayload = await hydrateRowsToPayload(rows, { provider: 'archidekt', deckId });
-    freshPayload.deckHash = deckHash;
+    // Otherwise (first time or changed), scrape + hydrate now
+    const rows = await scrapeArchidektRows(deckId);
+    const payload = await hydrateRowsToPayload(rows, { provider: 'archidekt', deckId });
+
+    // also compute a deckHash for debugging/consistency (not used for invalidation anymore)
+    payload.deckHash = hashJSON(rows.map(r => [r.name, r.quantity, r.foil, r.setCode, r.collectorNumber, r.category]));
 
     const rec = {
-      payload: freshPayload,
-      etag: weakEtagForPayload(freshPayload),
-      deckHash,
+      payload,
+      etag: weakEtagForPayload(payload),
+      archidektUpdatedAt: remoteUpdatedAt || null,
       lastScrapedAt: Date.now(),
     };
     deckCache.set(key, rec);
     return rec;
   })()
     .catch((e) => {
-      // On failure, fall back to any cached copy
+      console.error(`❌ resolveArchidekt failed: ${e.message}`);
+      // if something failed, fall back to any cached copy
       const fallback = deckCache.get(key);
       if (fallback) return fallback;
       throw e;
     })
-    .finally(() => {
-      inFlight.delete(key);
-    });
+    .finally(() => inFlight.delete(key));
 
   inFlight.set(key, p);
   return p;
@@ -275,7 +287,6 @@ async function scrapeMoxfield(deckId) {
     return {
       payload,
       etag: weakEtagForPayload(payload),
-      deckHash,
       lastScrapedAt: Date.now(),
     };
   } finally {
@@ -337,23 +348,29 @@ app.get('/api/deck', async (req, res) => {
       return res.status(400).json({ error: 'Unsupported deck provider' });
     }
 
-    const rec =
-      provider === 'archidekt' ? await resolveArchidekt(deckId) : await resolveMoxfield(deckId);
+    const rec = provider === 'archidekt'
+      ? await resolveArchidekt(deckId)
+      : await resolveMoxfield(deckId);
 
-    // Standard client conditional: only after we ensured the state is current (for Archidekt)
+    // Client-side conditional AFTER we ensured freshness (for Archidekt)
     const clientETag = req.headers['if-none-match'];
     if (clientETag && clientETag === rec.etag) {
       setNoCacheWithETag(res, rec.etag);
       return res.status(304).end();
     }
 
-    setNoCacheWithETag(res, rec.etag);
+    setNoCacheWithETAG(res, rec.etag); // typo guard
     return res.json(rec.payload);
   } catch (err) {
     console.error('❌ /api/deck failed:', err);
     return res.status(500).json({ error: 'Scraping failed', details: err.message });
   }
 });
+
+/* small helper to avoid copy/paste typos */
+function setNoCacheWithETAG(res, etag) {
+  setNoCacheWithETag(res, etag);
+}
 
 /* =========================
    Start
